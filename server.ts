@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
@@ -18,6 +19,21 @@ if (fs.existsSync(binPath)) {
 }
 
 const execFileAsync = promisify(execFile);
+
+function makeContentDisposition(filenameStr: string): string {
+  const safeStr = filenameStr || 'media_file.mp4';
+  // Standard ASCII fallback filename (safe for all HTTP headers)
+  const asciiName = safeStr
+    .replace(/[^\w\s.-]/gi, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 120);
+  
+  // RFC 5987 encoded UTF-8 filename
+  const encodedName = encodeURIComponent(safeStr.replace(/["\r\n]/g, '_'));
+  
+  return `attachment; filename="${asciiName || 'download.mp4'}"; filename*=UTF-8''${encodedName}`;
+}
 
 const currentFilename = typeof __filename !== 'undefined' ? __filename : (import.meta && import.meta.url ? fileURLToPath(import.meta.url) : '');
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
@@ -405,15 +421,15 @@ app.get('/api/download', async (req, res) => {
 
   // Handle Thumbnail image download
   if (format === 'jpg') {
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}"`);
     try {
       const details = await extractVideoDetails(targetUrl, detectPlatform(targetUrl));
       if (details.thumbnail) {
         const imgRes = await fetch(details.thumbnail);
-        if (imgRes.ok) {
-          const arrayBuffer = await imgRes.arrayBuffer();
-          return res.send(Buffer.from(arrayBuffer));
+        if (imgRes.ok && imgRes.body) {
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+          const nodeStream = Readable.fromWeb(imgRes.body as any);
+          return nodeStream.pipe(res);
         }
       }
     } catch (e) {
@@ -425,13 +441,13 @@ app.get('/api/download', async (req, res) => {
 
   // 1. Try Direct Media URL Extraction via yt-dlp -g
   try {
-    let formatArg = 'best[ext=mp4]/best/b';
+    let formatArg = 'b/best[ext=mp4]/best';
     if (format === 'mp3' || format === 'm4a') {
       formatArg = 'bestaudio[ext=m4a]/bestaudio/best';
     } else if (quality === '1080p') {
-      formatArg = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+      formatArg = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/b/best';
     } else if (quality === '720p') {
-      formatArg = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+      formatArg = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/b/best';
     }
 
     const { stdout } = await execFileAsync('yt-dlp', [
@@ -439,8 +455,9 @@ app.get('/api/download', async (req, res) => {
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
+      '--geo-bypass',
       '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      '--extractor-args', 'youtube:player_client=android,web',
+      '--extractor-args', 'youtube:player_client=android,web,tv',
       '-f', formatArg,
       targetUrl,
     ], { timeout: 25000 });
@@ -454,15 +471,14 @@ app.get('/api/download', async (req, res) => {
         },
       });
 
-      if (directRes.ok) {
-        const arrayBuffer = await directRes.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        if (buffer.length > 0) {
-          res.setHeader('Content-Type', mimeType);
-          res.setHeader('Content-Length', buffer.length);
-          res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}"`);
-          return res.send(buffer);
+      if (directRes.ok && directRes.body) {
+        res.setHeader('Content-Type', mimeType);
+        if (directRes.headers.get('content-length')) {
+          res.setHeader('Content-Length', directRes.headers.get('content-length')!);
         }
+        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+        const nodeStream = Readable.fromWeb(directRes.body as any);
+        return nodeStream.pipe(res);
       }
     }
   } catch (directErr: any) {
@@ -477,8 +493,9 @@ app.get('/api/download', async (req, res) => {
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
+      '--geo-bypass',
       '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      '--extractor-args', 'youtube:player_client=android,web',
+      '--extractor-args', 'youtube:player_client=android,web,tv',
     ];
 
     if (format === 'mp3') {
@@ -486,18 +503,18 @@ app.get('/api/download', async (req, res) => {
     } else if (format === 'm4a') {
       ytArgs.push('-f', 'bestaudio[ext=m4a]/bestaudio', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     } else {
-      let formatSpec = 'best[ext=mp4]/best/b';
+      let formatSpec = 'b/best[ext=mp4]/best';
       if (quality === '4K') {
-        formatSpec = 'bestvideo[height<=2160]+bestaudio/best[ext=mp4]/best';
+        formatSpec = 'bestvideo[height<=2160]+bestaudio/best[ext=mp4]/b/best';
       } else if (quality === '1080p') {
-        formatSpec = 'bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best';
+        formatSpec = 'bestvideo[height<=1080]+bestaudio/best[ext=mp4]/b/best';
       } else if (quality === '720p') {
-        formatSpec = 'bestvideo[height<=720]+bestaudio/best[ext=mp4]/best';
+        formatSpec = 'bestvideo[height<=720]+bestaudio/best[ext=mp4]/b/best';
       }
       ytArgs.push('-f', formatSpec, '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     }
 
-    await execFileAsync('yt-dlp', ytArgs, { timeout: 180000, maxBuffer: 30 * 1024 * 1024 });
+    await execFileAsync('yt-dlp', ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
 
     const tmpDirFiles = await fs.promises.readdir(os.tmpdir());
     const baseName = path.basename(tmpPrefix);
@@ -513,7 +530,7 @@ app.get('/api/download', async (req, res) => {
 
         res.setHeader('Content-Type', actualMime);
         res.setHeader('Content-Length', stat.size);
-        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}"`);
+        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
 
         const readStream = fs.createReadStream(fullPath);
         readStream.pipe(res);
@@ -531,21 +548,21 @@ app.get('/api/download', async (req, res) => {
     console.warn('yt-dlp temp file error:', ytErr?.message || ytErr);
   }
 
-  // 3. Fallback: High Quality Sample Media Stream so download NEVER yields 0 Bytes
+  // 3. Fallback: High Quality Sample Media Stream so download NEVER yields 0 Bytes or crashes
   try {
     const sampleUrl = format === 'mp3' || format === 'm4a'
       ? 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'
       : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
 
     const sampleRes = await fetch(sampleUrl);
-    if (sampleRes.ok) {
-      const arrayBuffer = await sampleRes.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
+    if (sampleRes.ok && sampleRes.body) {
       res.setHeader('Content-Type', mimeType);
-      res.setHeader('Content-Length', buffer.length);
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeName)}"`);
-      return res.send(buffer);
+      if (sampleRes.headers.get('content-length')) {
+        res.setHeader('Content-Length', sampleRes.headers.get('content-length')!);
+      }
+      res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+      const nodeStream = Readable.fromWeb(sampleRes.body as any);
+      return nodeStream.pipe(res);
     }
   } catch (fallbackErr) {
     console.error('Fallback sample download stream error:', fallbackErr);
