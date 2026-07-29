@@ -1,0 +1,6 @@
+{
+  "name": "Free Video Downloader",
+  "description": "Fast, high-quality, multi-platform video downloader and media extractor with AI video summaries and SEO tool pages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
