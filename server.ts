@@ -425,11 +425,12 @@ app.get('/api/download', async (req, res) => {
       const details = await extractVideoDetails(targetUrl, detectPlatform(targetUrl));
       if (details.thumbnail) {
         const imgRes = await fetch(details.thumbnail);
-        if (imgRes.ok && imgRes.body) {
+        if (imgRes.ok) {
+          const buf = Buffer.from(await imgRes.arrayBuffer());
           res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Content-Length', buf.length);
           res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-          const nodeStream = Readable.fromWeb(imgRes.body as any);
-          return nodeStream.pipe(res);
+          return res.send(buf);
         }
       }
     } catch (e) {
@@ -471,14 +472,14 @@ app.get('/api/download', async (req, res) => {
         },
       });
 
-      if (directRes.ok && directRes.body) {
-        res.setHeader('Content-Type', mimeType);
-        if (directRes.headers.get('content-length')) {
-          res.setHeader('Content-Length', directRes.headers.get('content-length')!);
+      if (directRes.ok) {
+        const buf = Buffer.from(await directRes.arrayBuffer());
+        if (buf.length > 0) {
+          res.setHeader('Content-Type', mimeType);
+          res.setHeader('Content-Length', buf.length);
+          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+          return res.send(buf);
         }
-        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-        const nodeStream = Readable.fromWeb(directRes.body as any);
-        return nodeStream.pipe(res);
       }
     }
   } catch (directErr: any) {
@@ -525,23 +526,9 @@ app.get('/api/download', async (req, res) => {
       const stat = await fs.promises.stat(fullPath);
 
       if (stat.size > 0) {
-        const ext = path.extname(targetFile).replace('.', '');
-        const actualMime = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/m4a' : 'video/mp4';
-
-        res.setHeader('Content-Type', actualMime);
-        res.setHeader('Content-Length', stat.size);
-        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-
-        const readStream = fs.createReadStream(fullPath);
-        readStream.pipe(res);
-
-        const cleanup = () => {
+        return res.download(fullPath, safeName, (err) => {
           fs.unlink(fullPath, () => {});
-        };
-        readStream.on('end', cleanup);
-        readStream.on('error', cleanup);
-        res.on('close', cleanup);
-        return;
+        });
       }
     }
   } catch (ytErr: any) {
@@ -555,14 +542,12 @@ app.get('/api/download', async (req, res) => {
       : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
 
     const sampleRes = await fetch(sampleUrl);
-    if (sampleRes.ok && sampleRes.body) {
+    if (sampleRes.ok) {
+      const buf = Buffer.from(await sampleRes.arrayBuffer());
       res.setHeader('Content-Type', mimeType);
-      if (sampleRes.headers.get('content-length')) {
-        res.setHeader('Content-Length', sampleRes.headers.get('content-length')!);
-      }
+      res.setHeader('Content-Length', buf.length);
       res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-      const nodeStream = Readable.fromWeb(sampleRes.body as any);
-      return nodeStream.pipe(res);
+      return res.send(buf);
     }
   } catch (fallbackErr) {
     console.error('Fallback sample download stream error:', fallbackErr);
