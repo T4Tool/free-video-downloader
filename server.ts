@@ -109,6 +109,8 @@ async function extractVideoDetails(url: string, platform: string) {
       '--dump-json',
       '--no-warnings',
       '--no-playlist',
+      '--geo-bypass',
+      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
       cleanUrl,
     ], { timeout: 20000, maxBuffer: 15 * 1024 * 1024 });
 
@@ -409,7 +411,55 @@ Return your answer strictly in JSON format with keys "summary" (string) and "hig
   }
 });
 
-// Download proxy endpoint using yt-dlp direct extraction, temp file generation & streaming
+async function fetchFromCobalt(targetUrl: string, format?: string, quality?: string): Promise<string | null> {
+  const instances = [
+    'https://api.cobalt.tools/',
+    'https://co.wuk.sh/',
+    'https://cobalt.api.sciter.io/',
+  ];
+
+  const bodyData: any = {
+    url: targetUrl,
+    videoQuality: quality === '4K' ? '2160' : quality === '1080p' ? '1080' : '720',
+  };
+
+  if (format === 'mp3' || format === 'm4a') {
+    bodyData.downloadMode = 'audio';
+    bodyData.audioFormat = format === 'm4a' ? 'm4a' : 'mp3';
+  } else {
+    bodyData.downloadMode = 'auto';
+  }
+
+  for (const endpoint of instances) {
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        },
+        body: JSON.stringify(bodyData),
+      });
+
+      if (resp.ok) {
+        const data: any = await resp.json();
+        if (data && (data.status === 'redirect' || data.status === 'stream' || data.status === 'tunnel') && data.url) {
+          return data.url;
+        }
+        if (data && data.status === 'picker' && Array.isArray(data.picker) && data.picker.length > 0) {
+          return data.picker[0].url || null;
+        }
+      }
+    } catch (e) {
+      // try next instance
+    }
+  }
+
+  return null;
+}
+
+// Download proxy endpoint using Cobalt API, yt-dlp direct extraction, temp file generation & streaming
 app.get('/api/download', async (req, res) => {
   const { url, filename, format, quality } = req.query;
   const targetUrl = (url as string) || '';
@@ -440,7 +490,31 @@ app.get('/api/download', async (req, res) => {
 
   const mimeType = format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/m4a' : 'video/mp4';
 
-  // 1. Try Direct Media URL Extraction via yt-dlp -g
+  // 1. Try Cobalt API Extraction (fastest & bypasses datacenter bot detection)
+  try {
+    const cobaltStreamUrl = await fetchFromCobalt(targetUrl, format as string, quality as string);
+    if (cobaltStreamUrl) {
+      const directRes = await fetch(cobaltStreamUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        },
+      });
+
+      if (directRes.ok) {
+        const buf = Buffer.from(await directRes.arrayBuffer());
+        if (buf.length > 0) {
+          res.setHeader('Content-Type', mimeType);
+          res.setHeader('Content-Length', buf.length);
+          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+          return res.send(buf);
+        }
+      }
+    }
+  } catch (cobaltErr: any) {
+    console.warn('Cobalt API attempt note:', cobaltErr?.message || cobaltErr);
+  }
+
+  // 2. Try Direct Media URL Extraction via yt-dlp -g with iOS/mweb player client
   try {
     let formatArg = 'b/best[ext=mp4]/best';
     if (format === 'mp3' || format === 'm4a') {
@@ -457,8 +531,8 @@ app.get('/api/download', async (req, res) => {
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      '--extractor-args', 'youtube:player_client=android,web,tv',
+      '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
       '-f', formatArg,
       targetUrl,
     ], { timeout: 25000 });
@@ -467,7 +541,7 @@ app.get('/api/download', async (req, res) => {
     if (directUrl && directUrl.startsWith('http')) {
       const directRes = await fetch(directUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
           'Referer': targetUrl.includes('youtube') ? 'https://www.youtube.com/' : targetUrl,
         },
       });
@@ -486,7 +560,7 @@ app.get('/api/download', async (req, res) => {
     console.warn('Direct URL stream attempt note:', directErr?.message || directErr);
   }
 
-  // 2. Try yt-dlp Temp File Download
+  // 3. Try yt-dlp Temp File Download with iOS/mweb player client
   const tmpPrefix = path.join(os.tmpdir(), `omnigrab_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
 
   try {
@@ -495,8 +569,8 @@ app.get('/api/download', async (req, res) => {
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      '--extractor-args', 'youtube:player_client=android,web,tv',
+      '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
     ];
 
     if (format === 'mp3') {
