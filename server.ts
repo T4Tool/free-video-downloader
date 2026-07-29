@@ -20,6 +20,25 @@ if (fs.existsSync(binPath)) {
 
 const execFileAsync = promisify(execFile);
 
+function getCookieFileArgs(): string[] {
+  if (process.env.YOUTUBE_COOKIES || process.env.COOKIES_TXT) {
+    const tmpCookiePath = path.join(os.tmpdir(), 'youtube_cookies.txt');
+    try {
+      fs.writeFileSync(tmpCookiePath, process.env.YOUTUBE_COOKIES || process.env.COOKIES_TXT || '', 'utf8');
+      return ['--cookies', tmpCookiePath];
+    } catch (e) {}
+  }
+  const rootCookies = path.join(process.cwd(), 'cookies.txt');
+  if (fs.existsSync(rootCookies)) {
+    return ['--cookies', rootCookies];
+  }
+  const rootYtCookies = path.join(process.cwd(), 'youtube_cookies.txt');
+  if (fs.existsSync(rootYtCookies)) {
+    return ['--cookies', rootYtCookies];
+  }
+  return [];
+}
+
 function makeContentDisposition(filenameStr: string): string {
   const safeStr = filenameStr || 'media_file.mp4';
   // Standard ASCII fallback filename (safe for all HTTP headers)
@@ -106,6 +125,7 @@ async function extractVideoDetails(url: string, platform: string) {
   // 1. Try yt-dlp first if available
   try {
     const { stdout } = await execFileAsync('yt-dlp', [
+      ...getCookieFileArgs(),
       '--dump-json',
       '--no-warnings',
       '--no-playlist',
@@ -139,7 +159,35 @@ async function extractVideoDetails(url: string, platform: string) {
     console.warn('yt-dlp extraction note:', err?.message || err);
   }
 
-  // 2. Fallback: YouTube oEmbed
+  // 2. Try Piped API for YouTube details if yt-dlp was blocked
+  if (platform === 'youtube' || cleanUrl.includes('youtu')) {
+    let vid = '';
+    if (cleanUrl.includes('v=')) vid = cleanUrl.split('v=')[1]?.split('&')[0] || '';
+    else if (cleanUrl.includes('youtu.be/')) vid = cleanUrl.split('youtu.be/')[1]?.split('?')[0] || '';
+
+    if (vid) {
+      const pipedBases = ['https://pipedapi.kavin.rocks', 'https://api.piped.yt', 'https://pipedapi.mha.fi'];
+      for (const base of pipedBases) {
+        try {
+          const res = await fetch(`${base}/streams/${vid}`);
+          if (res.ok) {
+            const data: any = await res.json();
+            if (data.title) {
+              return {
+                title: data.title,
+                author: data.uploader || 'YouTube Channel',
+                views: data.views ? formatViews(data.views) : '1.5M views',
+                duration: data.duration ? formatDuration(data.duration) : '03:45',
+                thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${vid}/maxresdefault.jpg`,
+              };
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 3. Fallback: YouTube oEmbed
   if (platform === 'youtube' || cleanUrl.includes('youtu')) {
     try {
       const oembedRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(cleanUrl)}&format=json`);
@@ -411,6 +459,96 @@ Return your answer strictly in JSON format with keys "summary" (string) and "hig
   }
 });
 
+// Extract YouTube Stream URL via Piped API or Invidious API (bypasses datacenter bot blocks)
+async function fetchYouTubeStream(targetUrl: string, format?: string, quality?: string): Promise<string | null> {
+  let videoId = '';
+  if (targetUrl.includes('v=')) {
+    videoId = targetUrl.split('v=')[1]?.split('&')[0] || '';
+  } else if (targetUrl.includes('youtu.be/')) {
+    videoId = targetUrl.split('youtu.be/')[1]?.split('?')[0]?.split('&')[0] || '';
+  } else if (targetUrl.includes('youtube.com/shorts/')) {
+    videoId = targetUrl.split('youtube.com/shorts/')[1]?.split('?')[0]?.split('&')[0] || '';
+  }
+
+  if (!videoId) return null;
+
+  // 1. Try Piped API instances
+  const pipedInstances = [
+    'https://pipedapi.kavin.rocks',
+    'https://api.piped.yt',
+    'https://pipedapi.mha.fi',
+    'https://pipedapi.adminforge.de',
+    'https://pipedapi.drgns.space',
+  ];
+
+  for (const base of pipedInstances) {
+    try {
+      const resp = await fetch(`${base}/streams/${videoId}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        },
+      });
+
+      if (resp.ok) {
+        const data: any = await resp.json();
+
+        if (format === 'mp3' || format === 'm4a') {
+          if (Array.isArray(data.audioStreams) && data.audioStreams.length > 0) {
+            const bestAudio = data.audioStreams.find((s: any) => s.format === 'M4A' || s.mimeType?.includes('audio/mp4')) || data.audioStreams[0];
+            if (bestAudio?.url) return bestAudio.url;
+          }
+        }
+
+        if (Array.isArray(data.videoStreams) && data.videoStreams.length > 0) {
+          const targetRes = quality === '1080p' ? '1080' : quality === '720p' ? '720' : '720';
+          let match = data.videoStreams.find((v: any) => v.videoOnly === false && v.quality?.includes(targetRes));
+          if (!match) match = data.videoStreams.find((v: any) => v.videoOnly === false);
+          if (!match) match = data.videoStreams[0];
+          if (match?.url) return match.url;
+        }
+      }
+    } catch (e) {
+      // try next instance
+    }
+  }
+
+  // 2. Try Invidious API instances
+  const invidiousInstances = [
+    'https://inv.tux.pizza',
+    'https://invidious.drgns.space',
+    'https://invidious.nerdvpn.de',
+    'https://yt.artemislena.eu',
+  ];
+
+  for (const base of invidiousInstances) {
+    try {
+      const resp = await fetch(`${base}/api/v1/videos/${videoId}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+
+      if (resp.ok) {
+        const data: any = await resp.json();
+        if (format === 'mp3' || format === 'm4a') {
+          if (Array.isArray(data.adaptiveFormats)) {
+            const audio = data.adaptiveFormats.find((f: any) => f.type?.includes('audio/mp4') || f.container === 'm4a') || data.adaptiveFormats.find((f: any) => f.type?.includes('audio'));
+            if (audio?.url) return audio.url;
+          }
+        }
+        if (Array.isArray(data.formatStreams) && data.formatStreams.length > 0) {
+          const match = data.formatStreams.find((s: any) => s.container === 'mp4') || data.formatStreams[0];
+          if (match?.url) return match.url;
+        }
+      }
+    } catch (e) {
+      // try next
+    }
+  }
+
+  return null;
+}
+
 async function fetchFromCobalt(targetUrl: string, format?: string, quality?: string): Promise<string | null> {
   const instances = [
     'https://api.cobalt.tools/',
@@ -490,7 +628,33 @@ app.get('/api/download', async (req, res) => {
 
   const mimeType = format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/m4a' : 'video/mp4';
 
-  // 1. Try Cobalt API Extraction (fastest & bypasses datacenter bot detection)
+  // 1. Try Piped & Invidious API Stream Resolver for YouTube (bypasses datacenter bot blocks)
+  if (targetUrl.includes('youtube') || targetUrl.includes('youtu.be')) {
+    try {
+      const ytStreamUrl = await fetchYouTubeStream(targetUrl, format as string, quality as string);
+      if (ytStreamUrl) {
+        const directRes = await fetch(ytStreamUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          },
+        });
+
+        if (directRes.ok) {
+          const buf = Buffer.from(await directRes.arrayBuffer());
+          if (buf.length > 0) {
+            res.setHeader('Content-Type', mimeType);
+            res.setHeader('Content-Length', buf.length);
+            res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+            return res.send(buf);
+          }
+        }
+      }
+    } catch (ytStreamErr: any) {
+      console.warn('YouTube Piped/Invidious stream note:', ytStreamErr?.message || ytStreamErr);
+    }
+  }
+
+  // 2. Try Cobalt API Extraction
   try {
     const cobaltStreamUrl = await fetchFromCobalt(targetUrl, format as string, quality as string);
     if (cobaltStreamUrl) {
@@ -526,6 +690,7 @@ app.get('/api/download', async (req, res) => {
     }
 
     const { stdout } = await execFileAsync('yt-dlp', [
+      ...getCookieFileArgs(),
       '-g',
       '--no-playlist',
       '--no-warnings',
@@ -565,6 +730,7 @@ app.get('/api/download', async (req, res) => {
 
   try {
     let ytArgs: string[] = [
+      ...getCookieFileArgs(),
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
