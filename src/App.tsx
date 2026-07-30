@@ -8,6 +8,7 @@ import { FeaturesSection } from './components/FeaturesSection';
 import { HowItWorks } from './components/HowItWorks';
 import { FaqSection } from './components/FaqSection';
 import { HistoryDrawer } from './components/HistoryDrawer';
+import { YouTubeCookieModal } from './components/YouTubeCookieModal';
 import { Footer } from './components/Footer';
 import { LegalModal } from './components/LegalModal';
 import { ALL_TOOLS } from './data/toolsData';
@@ -21,6 +22,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [cookiesModalOpen, setCookiesModalOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [legalPage, setLegalPage] = useState<'about' | 'privacy' | 'terms' | 'contact' | null>(null);
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformId | 'all'>('all');
@@ -175,6 +177,7 @@ export default function App() {
         darkMode={darkMode}
         setDarkMode={setDarkMode}
         onOpenHistory={() => setHistoryOpen(true)}
+        onOpenCookies={() => setCookiesModalOpen(true)}
         onSelectTool={handleSelectTool}
         currentSlug={currentSlug}
         onOpenLegal={setLegalPage}
@@ -259,6 +262,13 @@ export default function App() {
       <LegalModal
         page={legalPage}
         onClose={() => setLegalPage(null)}
+        darkMode={darkMode}
+      />
+
+      {/* YouTube Cookies Authentication Modal (Option 1) */}
+      <YouTubeCookieModal
+        isOpen={cookiesModalOpen}
+        onClose={() => setCookiesModalOpen(false)}
         darkMode={darkMode}
       />
     </div>

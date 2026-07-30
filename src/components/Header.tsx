@@ -9,7 +9,8 @@ import {
   Menu, 
   X,
   ShieldCheck,
-  Globe
+  Globe,
+  Cookie
 } from 'lucide-react';
 import { ALL_TOOLS } from '../data/toolsData';
 
@@ -17,6 +18,7 @@ interface HeaderProps {
   darkMode: boolean;
   setDarkMode: (val: boolean) => void;
   onOpenHistory: () => void;
+  onOpenCookies: () => void;
   onSelectTool: (slug: string | null) => void;
   currentSlug: string | null;
   onOpenLegal: (page: 'about' | 'privacy' | 'terms' | 'contact') => void;
@@ -26,6 +28,7 @@ export const Header: React.FC<HeaderProps> = ({
   darkMode,
   setDarkMode,
   onOpenHistory,
+  onOpenCookies,
   onSelectTool,
   currentSlug,
   onOpenLegal,
@@ -170,6 +173,20 @@ export const Header: React.FC<HeaderProps> = ({
             title="Search Downloader Tools"
           >
             <Search className="w-4 h-4" />
+          </button>
+
+          {/* YouTube Cookies Auth Button */}
+          <button
+            onClick={onOpenCookies}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold transition-all ${
+              darkMode
+                ? 'bg-slate-900/80 border-slate-800 text-cyan-400 hover:bg-slate-800 hover:border-cyan-500/30'
+                : 'bg-slate-100 border-slate-200 text-cyan-600 hover:bg-slate-200'
+            }`}
+            title="Configure YouTube Cookies (Option 1)"
+          >
+            <Cookie className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline">YT Cookies</span>
           </button>
 
           {/* Download History Toggle */}

@@ -238,6 +238,101 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'online', service: 'OmniGrab Downloader API v1.0' });
 });
 
+// Cookie Management API Endpoints
+app.get('/api/cookies/status', (req, res) => {
+  const cookieArgs = getCookieFileArgs();
+  let active = false;
+  let source = 'none';
+  let length = 0;
+
+  if (process.env.YOUTUBE_COOKIES || process.env.COOKIES_TXT) {
+    active = true;
+    source = 'environment_variable';
+    length = (process.env.YOUTUBE_COOKIES || process.env.COOKIES_TXT || '').length;
+  } else {
+    const rootYt = path.join(process.cwd(), 'youtube_cookies.txt');
+    const rootTxt = path.join(process.cwd(), 'cookies.txt');
+    if (fs.existsSync(rootYt)) {
+      active = true;
+      source = 'youtube_cookies.txt';
+      length = fs.statSync(rootYt).size;
+    } else if (fs.existsSync(rootTxt)) {
+      active = true;
+      source = 'cookies.txt';
+      length = fs.statSync(rootTxt).size;
+    }
+  }
+
+  res.json({ active, source, length });
+});
+
+app.post('/api/cookies/save', (req, res) => {
+  try {
+    const { cookiesText } = req.body;
+    if (!cookiesText || typeof cookiesText !== 'string' || cookiesText.trim().length === 0) {
+      // If empty string sent, clear cookies
+      process.env.YOUTUBE_COOKIES = '';
+      process.env.COOKIES_TXT = '';
+      const rootYt = path.join(process.cwd(), 'youtube_cookies.txt');
+      if (fs.existsSync(rootYt)) fs.unlinkSync(rootYt);
+      return res.json({ success: true, message: 'Cookies cleared successfully.' });
+    }
+
+    const cleanText = cookiesText.trim();
+    process.env.YOUTUBE_COOKIES = cleanText;
+
+    // Save locally
+    const rootYt = path.join(process.cwd(), 'youtube_cookies.txt');
+    fs.writeFileSync(rootYt, cleanText, 'utf8');
+
+    const tmpPath = path.join(os.tmpdir(), 'youtube_cookies.txt');
+    fs.writeFileSync(tmpPath, cleanText, 'utf8');
+
+    return res.json({
+      success: true,
+      message: 'YouTube cookies saved successfully! yt-dlp will now use these cookies for all extractions.',
+      length: cleanText.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to save cookies' });
+  }
+});
+
+app.post('/api/cookies/test', async (req, res) => {
+  try {
+    const cookieArgs = getCookieFileArgs();
+    if (cookieArgs.length === 0) {
+      return res.json({
+        success: false,
+        error: 'No cookies configured yet. Please paste Netscape format cookies or set YOUTUBE_COOKIES.',
+      });
+    }
+
+    const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+    const { stdout } = await execFileAsync('yt-dlp', [
+      ...cookieArgs,
+      '--dump-json',
+      '--no-warnings',
+      '--no-playlist',
+      '--geo-bypass',
+      testUrl,
+    ], { timeout: 15000 });
+
+    const info = JSON.parse(stdout);
+    return res.json({
+      success: true,
+      title: info.title || 'YouTube Test Video',
+      channel: info.uploader || info.channel || 'YouTube',
+      message: 'Authentication successful! YouTube cookies are active and bypassing bot checks.',
+    });
+  } catch (err: any) {
+    return res.json({
+      success: false,
+      error: err?.message || 'Cookies test failed. Ensure the cookies are fresh from YouTube.',
+    });
+  }
+});
+
 // Dynamic Sitemap XML Endpoint
 app.get('/sitemap.xml', (req, res) => {
   const baseUrl = `${req.protocol}://${req.get('host')}`;
