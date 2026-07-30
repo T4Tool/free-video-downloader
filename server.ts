@@ -39,6 +39,16 @@ function getCookieFileArgs(): string[] {
   return [];
 }
 
+function getYoutubeExtractorArgs(): string[] {
+  const cookieArgs = getCookieFileArgs();
+  if (cookieArgs.length > 0) {
+    // When browser cookies are provided, use web/android client to match cookie session
+    return ['--extractor-args', 'youtube:player_client=web,android'];
+  }
+  // When no cookies exist, use mobile client to bypass standard bot check
+  return ['--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded'];
+}
+
 function makeContentDisposition(filenameStr: string): string {
   const safeStr = filenameStr || 'media_file.mp4';
   // Standard ASCII fallback filename (safe for all HTTP headers)
@@ -130,7 +140,7 @@ async function extractVideoDetails(url: string, platform: string) {
       '--no-warnings',
       '--no-playlist',
       '--geo-bypass',
-      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
+      ...getYoutubeExtractorArgs(),
       cleanUrl,
     ], { timeout: 20000, maxBuffer: 15 * 1024 * 1024 });
 
@@ -315,8 +325,9 @@ app.post('/api/cookies/test', async (req, res) => {
       '--no-warnings',
       '--no-playlist',
       '--geo-bypass',
+      ...getYoutubeExtractorArgs(),
       testUrl,
-    ], { timeout: 15000 });
+    ], { timeout: 20000 });
 
     const info = JSON.parse(stdout);
     return res.json({
@@ -773,15 +784,15 @@ app.get('/api/download', async (req, res) => {
     console.warn('Cobalt API attempt note:', cobaltErr?.message || cobaltErr);
   }
 
-  // 2. Try Direct Media URL Extraction via yt-dlp -g with iOS/mweb player client
+  // 2. Try Direct Media URL Extraction via yt-dlp -g
   try {
-    let formatArg = 'b/best[ext=mp4]/best';
+    let formatArg = 'b/best';
     if (format === 'mp3' || format === 'm4a') {
-      formatArg = 'bestaudio[ext=m4a]/bestaudio/best';
+      formatArg = 'bestaudio/best';
     } else if (quality === '1080p') {
-      formatArg = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/b/best';
+      formatArg = 'bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best[height<=1080]/b/best';
     } else if (quality === '720p') {
-      formatArg = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/b/best';
+      formatArg = 'bestvideo[height<=720]+bestaudio/bestvideo[height<=720]/best[height<=720]/b/best';
     }
 
     const { stdout } = await execFileAsync('yt-dlp', [
@@ -791,8 +802,7 @@ app.get('/api/download', async (req, res) => {
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
+      ...getYoutubeExtractorArgs(),
       '-f', formatArg,
       targetUrl,
     ], { timeout: 25000 });
@@ -801,7 +811,7 @@ app.get('/api/download', async (req, res) => {
     if (directUrl && directUrl.startsWith('http')) {
       const directRes = await fetch(directUrl, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
           'Referer': targetUrl.includes('youtube') ? 'https://www.youtube.com/' : targetUrl,
         },
       });
@@ -820,7 +830,7 @@ app.get('/api/download', async (req, res) => {
     console.warn('Direct URL stream attempt note:', directErr?.message || directErr);
   }
 
-  // 3. Try yt-dlp Temp File Download with iOS/mweb player client
+  // 3. Try yt-dlp Temp File Download
   const tmpPrefix = path.join(os.tmpdir(), `omnigrab_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
 
   try {
@@ -830,27 +840,42 @@ app.get('/api/download', async (req, res) => {
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-      '--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded',
+      ...getYoutubeExtractorArgs(),
     ];
 
     if (format === 'mp3') {
-      ytArgs.push('-x', '--audio-format', 'mp3', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
+      ytArgs.push('-x', '--audio-format', 'mp3', '-f', 'bestaudio/best', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     } else if (format === 'm4a') {
-      ytArgs.push('-f', 'bestaudio[ext=m4a]/bestaudio', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
+      ytArgs.push('-f', 'bestaudio[ext=m4a]/bestaudio/best', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     } else {
-      let formatSpec = 'b/best[ext=mp4]/best';
+      let formatSpec = 'b/best';
       if (quality === '4K') {
-        formatSpec = 'bestvideo[height<=2160]+bestaudio/best[ext=mp4]/b/best';
+        formatSpec = 'bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]/best[height<=2160]/b/best';
       } else if (quality === '1080p') {
-        formatSpec = 'bestvideo[height<=1080]+bestaudio/best[ext=mp4]/b/best';
+        formatSpec = 'bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best[height<=1080]/b/best';
       } else if (quality === '720p') {
-        formatSpec = 'bestvideo[height<=720]+bestaudio/best[ext=mp4]/b/best';
+        formatSpec = 'bestvideo[height<=720]+bestaudio/bestvideo[height<=720]/best[height<=720]/b/best';
       }
       ytArgs.push('-f', formatSpec, '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     }
 
-    await execFileAsync('yt-dlp', ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
+    try {
+      await execFileAsync('yt-dlp', ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
+    } catch (firstAttemptErr: any) {
+      console.warn('First yt-dlp format attempt failed, retrying with fallback b/best format:', firstAttemptErr?.message || firstAttemptErr);
+      const fallbackYtArgs = [
+        ...getCookieFileArgs(),
+        '--no-playlist',
+        '--no-warnings',
+        '--no-check-certificates',
+        '--geo-bypass',
+        ...getYoutubeExtractorArgs(),
+        '-f', 'b/best',
+        '-o', `${tmpPrefix}.%(ext)s`,
+        targetUrl,
+      ];
+      await execFileAsync('yt-dlp', fallbackYtArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
+    }
 
     const tmpDirFiles = await fs.promises.readdir(os.tmpdir());
     const baseName = path.basename(tmpPrefix);
