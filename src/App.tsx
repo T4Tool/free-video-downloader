@@ -9,6 +9,7 @@ import { HowItWorks } from './components/HowItWorks';
 import { FaqSection } from './components/FaqSection';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { YouTubeCookieModal } from './components/YouTubeCookieModal';
+import { DownloadLoadingModal } from './components/DownloadLoadingModal';
 import { Footer } from './components/Footer';
 import { LegalModal } from './components/LegalModal';
 import { ALL_TOOLS } from './data/toolsData';
@@ -26,6 +27,13 @@ export default function App() {
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [legalPage, setLegalPage] = useState<'about' | 'privacy' | 'terms' | 'contact' | null>(null);
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformId | 'all'>('all');
+
+  // Download Progress Modal States
+  const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+  const [downloadingFormat, setDownloadingFormat] = useState<MediaFormat | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStage, setDownloadStage] = useState<'connecting' | 'processing' | 'downloading' | 'completed' | 'error'>('connecting');
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const currentToolObj = ALL_TOOLS.find((t) => t.slug === currentSlug);
 
@@ -123,9 +131,14 @@ export default function App() {
     }
   };
 
-  const handleDownloadFormat = (fmt: MediaFormat) => {
+  const handleDownloadFormat = async (fmt: MediaFormat) => {
     if (!extractedMedia) return;
     setDownloadingId(fmt.id);
+    setDownloadingFormat(fmt);
+    setDownloadProgress(0);
+    setDownloadStage('connecting');
+    setDownloadError(null);
+    setDownloadModalOpen(true);
 
     // Save item to history
     const newItem: DownloadHistoryItem = {
@@ -146,17 +159,98 @@ export default function App() {
       console.warn('LocalStorage save error', e);
     }
 
-    // Trigger browser file download via proxy link
+    // Animated stage progression while server connects
+    const stageTimer1 = setTimeout(() => {
+      setDownloadStage('processing');
+    }, 1200);
+
+    const stageTimer2 = setTimeout(() => {
+      setDownloadStage('downloading');
+      setDownloadProgress(20);
+    }, 2800);
+
+    try {
+      const response = await fetch(fmt.downloadUrl);
+      clearTimeout(stageTimer1);
+      clearTimeout(stageTimer2);
+
+      if (!response.ok) {
+        throw new Error('Download stream returned a server error. Please retry or choose another quality.');
+      }
+
+      setDownloadStage('downloading');
+
+      const contentLength = response.headers.get('content-length');
+      const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+      
+      let filename = `${extractedMedia.title}_${fmt.quality}.${fmt.format}`.replace(/[^\w\s.-]/gi, '_');
+      const disposition = response.headers.get('content-disposition');
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        if (match && match[1]) {
+          filename = decodeURIComponent(match[1]);
+        }
+      }
+
+      if (!response.body) {
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        triggerBlobDownload(blobUrl, filename);
+        finishSuccess();
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let receivedBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          receivedBytes += value.length;
+          if (totalBytes > 0) {
+            const percent = Math.min(99, Math.round((receivedBytes / totalBytes) * 100));
+            setDownloadProgress(percent);
+          } else {
+            setDownloadProgress((prev) => Math.min(95, prev + 8));
+          }
+        }
+      }
+
+      const blob = new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+      const blobUrl = URL.createObjectURL(blob);
+      triggerBlobDownload(blobUrl, filename);
+      finishSuccess();
+
+    } catch (err: any) {
+      clearTimeout(stageTimer1);
+      clearTimeout(stageTimer2);
+      console.warn('Download error:', err);
+      setDownloadStage('error');
+      setDownloadError(err?.message || 'Download failed. Please check connection and try again.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const triggerBlobDownload = (url: string, filename: string) => {
     const link = document.createElement('a');
-    link.href = fmt.downloadUrl;
-    link.download = `${extractedMedia.title}_${fmt.quality}.${fmt.format}`;
+    link.href = url;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
 
+  const finishSuccess = () => {
+    setDownloadProgress(100);
+    setDownloadStage('completed');
     setTimeout(() => {
-      setDownloadingId(null);
-    }, 1500);
+      setDownloadModalOpen(false);
+    }, 2200);
   };
 
   const handleClearHistory = () => {
@@ -270,6 +364,21 @@ export default function App() {
         isOpen={cookiesModalOpen}
         onClose={() => setCookiesModalOpen(false)}
         darkMode={darkMode}
+      />
+
+      {/* Download Loading Screen & Progress Overlay Modal */}
+      <DownloadLoadingModal
+        isOpen={downloadModalOpen}
+        media={extractedMedia}
+        format={downloadingFormat}
+        darkMode={darkMode}
+        onClose={() => setDownloadModalOpen(false)}
+        downloadProgress={downloadProgress}
+        downloadStage={downloadStage}
+        errorMessage={downloadError}
+        onRetry={() => {
+          if (downloadingFormat) handleDownloadFormat(downloadingFormat);
+        }}
       />
     </div>
   );

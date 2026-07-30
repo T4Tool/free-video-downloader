@@ -40,13 +40,33 @@ function getCookieFileArgs(): string[] {
 }
 
 function getYoutubeExtractorArgs(): string[] {
+  // Always include mweb, ios, tv_embedded which bypass cloud datacenter bot checks on YouTube
+  return ['--extractor-args', 'youtube:player_client=mweb,ios,tv_embedded'];
+}
+
+async function runYtDlp(argsWithoutCookies: string[], options: any = {}): Promise<{ stdout: string; stderr: string }> {
   const cookieArgs = getCookieFileArgs();
+  const extractorArgs = getYoutubeExtractorArgs();
+
   if (cookieArgs.length > 0) {
-    // When browser cookies are provided, use web/android client to match cookie session
-    return ['--extractor-args', 'youtube:player_client=web,android'];
+    try {
+      const res = await execFileAsync('yt-dlp', [
+        ...cookieArgs,
+        ...extractorArgs,
+        ...argsWithoutCookies
+      ], options);
+      return { stdout: String(res.stdout), stderr: String(res.stderr) };
+    } catch (err: any) {
+      console.warn('yt-dlp with cookies failed, retrying without cookies...', err?.message || err);
+    }
   }
-  // When no cookies exist, use mobile client to bypass standard bot check
-  return ['--extractor-args', 'youtube:player_client=ios,mweb,tv_embedded'];
+
+  // Run without cookies
+  const res = await execFileAsync('yt-dlp', [
+    ...extractorArgs,
+    ...argsWithoutCookies
+  ], options);
+  return { stdout: String(res.stdout), stderr: String(res.stderr) };
 }
 
 function makeContentDisposition(filenameStr: string): string {
@@ -134,13 +154,11 @@ async function extractVideoDetails(url: string, platform: string) {
 
   // 1. Try yt-dlp first if available
   try {
-    const { stdout } = await execFileAsync('yt-dlp', [
-      ...getCookieFileArgs(),
+    const { stdout } = await runYtDlp([
       '--dump-json',
       '--no-warnings',
       '--no-playlist',
       '--geo-bypass',
-      ...getYoutubeExtractorArgs(),
       cleanUrl,
     ], { timeout: 20000, maxBuffer: 15 * 1024 * 1024 });
 
@@ -795,14 +813,12 @@ app.get('/api/download', async (req, res) => {
       formatArg = 'bestvideo[height<=720]+bestaudio/bestvideo[height<=720]/best[height<=720]/b/best';
     }
 
-    const { stdout } = await execFileAsync('yt-dlp', [
-      ...getCookieFileArgs(),
+    const { stdout } = await runYtDlp([
       '-g',
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      ...getYoutubeExtractorArgs(),
       '-f', formatArg,
       targetUrl,
     ], { timeout: 25000 });
@@ -835,12 +851,10 @@ app.get('/api/download', async (req, res) => {
 
   try {
     let ytArgs: string[] = [
-      ...getCookieFileArgs(),
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
       '--geo-bypass',
-      ...getYoutubeExtractorArgs(),
     ];
 
     if (format === 'mp3') {
@@ -860,21 +874,19 @@ app.get('/api/download', async (req, res) => {
     }
 
     try {
-      await execFileAsync('yt-dlp', ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
+      await runYtDlp(ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
     } catch (firstAttemptErr: any) {
       console.warn('First yt-dlp format attempt failed, retrying with fallback b/best format:', firstAttemptErr?.message || firstAttemptErr);
       const fallbackYtArgs = [
-        ...getCookieFileArgs(),
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
         '--geo-bypass',
-        ...getYoutubeExtractorArgs(),
         '-f', 'b/best',
         '-o', `${tmpPrefix}.%(ext)s`,
         targetUrl,
       ];
-      await execFileAsync('yt-dlp', fallbackYtArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
+      await runYtDlp(fallbackYtArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
     }
 
     const tmpDirFiles = await fs.promises.readdir(os.tmpdir());
