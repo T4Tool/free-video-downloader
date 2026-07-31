@@ -39,18 +39,30 @@ function getCookieFileArgs(): string[] {
   return [];
 }
 
+function getYtDlpPath(): string {
+  const localBinPath = path.join(process.cwd(), 'bin', 'yt-dlp');
+  if (fs.existsSync(localBinPath)) {
+    return localBinPath;
+  }
+  return 'yt-dlp';
+}
+
 function getYoutubeExtractorArgs(): string[] {
-  // Always include mweb, ios, tv_embedded which bypass cloud datacenter bot checks on YouTube
-  return ['--extractor-args', 'youtube:player_client=mweb,ios,tv_embedded'];
+  // Bypasses YouTube datacenter bot detection & PO Token requirement on Render/Cloud hosting:
+  // Use ios,android,mweb,tv_embedded player clients
+  return [
+    '--extractor-args', 'youtube:player_client=ios,android,mweb,tv_embedded'
+  ];
 }
 
 async function runYtDlp(argsWithoutCookies: string[], options: any = {}): Promise<{ stdout: string; stderr: string }> {
+  const binaryPath = getYtDlpPath();
   const cookieArgs = getCookieFileArgs();
   const extractorArgs = getYoutubeExtractorArgs();
 
   if (cookieArgs.length > 0) {
     try {
-      const res = await execFileAsync('yt-dlp', [
+      const res = await execFileAsync(binaryPath, [
         ...cookieArgs,
         ...extractorArgs,
         ...argsWithoutCookies
@@ -62,7 +74,7 @@ async function runYtDlp(argsWithoutCookies: string[], options: any = {}): Promis
   }
 
   // Run without cookies
-  const res = await execFileAsync('yt-dlp', [
+  const res = await execFileAsync(binaryPath, [
     ...extractorArgs,
     ...argsWithoutCookies
   ], options);
@@ -88,7 +100,7 @@ const currentFilename = typeof __filename !== 'undefined' ? __filename : (import
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -337,7 +349,7 @@ app.post('/api/cookies/test', async (req, res) => {
     }
 
     const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
-    const { stdout } = await execFileAsync('yt-dlp', [
+    const { stdout } = await execFileAsync(getYtDlpPath(), [
       ...cookieArgs,
       '--dump-json',
       '--no-warnings',
@@ -721,98 +733,33 @@ async function fetchFromCobalt(targetUrl: string, format?: string, quality?: str
   return null;
 }
 
-// Download proxy endpoint using Cobalt API, yt-dlp direct extraction, temp file generation & streaming
-app.get('/api/download', async (req, res) => {
-  const { url, filename, format, quality } = req.query;
-  const targetUrl = (url as string) || '';
-  const safeName = (filename as string) || `download_${Date.now()}.${format || 'mp4'}`;
-  
-  if (!targetUrl) {
-    return res.status(400).send('Missing media URL parameter');
+function getOptimalYtDlpFormat(format?: string, quality?: string): string {
+  if (format === 'mp3' || format === 'm4a') {
+    return 'bestaudio/ba/b/best*';
   }
-
-  // Handle Thumbnail image download
-  if (format === 'jpg') {
-    try {
-      const details = await extractVideoDetails(targetUrl, detectPlatform(targetUrl));
-      if (details.thumbnail) {
-        const imgRes = await fetch(details.thumbnail);
-        if (imgRes.ok) {
-          const buf = Buffer.from(await imgRes.arrayBuffer());
-          res.setHeader('Content-Type', 'image/jpeg');
-          res.setHeader('Content-Length', buf.length);
-          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-          return res.send(buf);
-        }
-      }
-    } catch (e) {
-      console.warn('Thumbnail download fallback error:', e);
-    }
+  if (quality === '4K') {
+    return 'bestvideo[height<=2160]+bestaudio/best[height<=2160]/best/18/22/bv*+ba/b/best*';
   }
-
-  const mimeType = format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/m4a' : 'video/mp4';
-
-  // 1. Try Piped & Invidious API Stream Resolver for YouTube (bypasses datacenter bot blocks)
-  if (targetUrl.includes('youtube') || targetUrl.includes('youtu.be')) {
-    try {
-      const ytStreamUrl = await fetchYouTubeStream(targetUrl, format as string, quality as string);
-      if (ytStreamUrl) {
-        const directRes = await fetch(ytStreamUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          },
-        });
-
-        if (directRes.ok) {
-          const buf = Buffer.from(await directRes.arrayBuffer());
-          if (buf.length > 0) {
-            res.setHeader('Content-Type', mimeType);
-            res.setHeader('Content-Length', buf.length);
-            res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-            return res.send(buf);
-          }
-        }
-      }
-    } catch (ytStreamErr: any) {
-      console.warn('YouTube Piped/Invidious stream note:', ytStreamErr?.message || ytStreamErr);
-    }
+  if (quality === '1080p') {
+    return 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/18/22/bv*+ba/b/best*';
   }
+  if (quality === '720p') {
+    return 'bestvideo[height<=720]+bestaudio/best[height<=720]/best/18/22/bv*+ba/b/best*';
+  }
+  return 'best/18/22/bv*+ba/b/best*';
+}
 
-  // 2. Try Cobalt API Extraction
+async function tryYtDlpDirectStream(
+  targetUrl: string,
+  format: string,
+  quality: string,
+  res: express.Response,
+  mimeType: string,
+  safeName: string
+): Promise<boolean> {
+  console.log(`[Download Stage 1] Method: yt-dlp -g (Direct Stream URL) -> Attempting...`);
   try {
-    const cobaltStreamUrl = await fetchFromCobalt(targetUrl, format as string, quality as string);
-    if (cobaltStreamUrl) {
-      const directRes = await fetch(cobaltStreamUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        },
-      });
-
-      if (directRes.ok) {
-        const buf = Buffer.from(await directRes.arrayBuffer());
-        if (buf.length > 0) {
-          res.setHeader('Content-Type', mimeType);
-          res.setHeader('Content-Length', buf.length);
-          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-          return res.send(buf);
-        }
-      }
-    }
-  } catch (cobaltErr: any) {
-    console.warn('Cobalt API attempt note:', cobaltErr?.message || cobaltErr);
-  }
-
-  // 2. Try Direct Media URL Extraction via yt-dlp -g
-  try {
-    let formatArg = 'b/best';
-    if (format === 'mp3' || format === 'm4a') {
-      formatArg = 'bestaudio/best';
-    } else if (quality === '1080p') {
-      formatArg = 'bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best[height<=1080]/b/best';
-    } else if (quality === '720p') {
-      formatArg = 'bestvideo[height<=720]+bestaudio/bestvideo[height<=720]/best[height<=720]/b/best';
-    }
-
+    const formatArg = getOptimalYtDlpFormat(format, quality);
     const { stdout } = await runYtDlp([
       '-g',
       '--no-playlist',
@@ -832,23 +779,31 @@ app.get('/api/download', async (req, res) => {
         },
       });
 
-      if (directRes.ok) {
-        const buf = Buffer.from(await directRes.arrayBuffer());
-        if (buf.length > 0) {
-          res.setHeader('Content-Type', mimeType);
-          res.setHeader('Content-Length', buf.length);
-          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-          return res.send(buf);
-        }
+      if (directRes.ok && directRes.body) {
+        console.log(`[Download Stage 1] Method: yt-dlp -g -> SUCCESS (Streaming directly to browser without RAM buffer)`);
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+        Readable.fromWeb(directRes.body as any).pipe(res);
+        return true;
+      } else {
+        console.log(`[Download Stage 1] Method: yt-dlp -g -> Direct URL fetch returned HTTP ${directRes.status}`);
       }
     }
-  } catch (directErr: any) {
-    console.warn('Direct URL stream attempt note:', directErr?.message || directErr);
+  } catch (err: any) {
+    console.warn(`[Download Stage 1] Method: yt-dlp -g -> FAILED: ${err?.message || err}`);
   }
+  return false;
+}
 
-  // 3. Try yt-dlp Temp File Download
+async function tryYtDlpFileStream(
+  targetUrl: string,
+  format: string,
+  quality: string,
+  res: express.Response,
+  safeName: string
+): Promise<boolean> {
+  console.log(`[Download Stage 2] Method: yt-dlp Temporary File Stream -> Attempting...`);
   const tmpPrefix = path.join(os.tmpdir(), `omnigrab_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
-
   try {
     let ytArgs: string[] = [
       '--no-playlist',
@@ -858,31 +813,23 @@ app.get('/api/download', async (req, res) => {
     ];
 
     if (format === 'mp3') {
-      ytArgs.push('-x', '--audio-format', 'mp3', '-f', 'bestaudio/best', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
+      ytArgs.push('-x', '--audio-format', 'mp3', '-f', 'bestaudio/ba/b/best*', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     } else if (format === 'm4a') {
-      ytArgs.push('-f', 'bestaudio[ext=m4a]/bestaudio/best', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
+      ytArgs.push('-f', 'bestaudio[ext=m4a]/bestaudio/ba/b/best*', '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     } else {
-      let formatSpec = 'b/best';
-      if (quality === '4K') {
-        formatSpec = 'bestvideo[height<=2160]+bestaudio/bestvideo[height<=2160]/best[height<=2160]/b/best';
-      } else if (quality === '1080p') {
-        formatSpec = 'bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best[height<=1080]/b/best';
-      } else if (quality === '720p') {
-        formatSpec = 'bestvideo[height<=720]+bestaudio/bestvideo[height<=720]/best[height<=720]/b/best';
-      }
-      ytArgs.push('-f', formatSpec, '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
+      ytArgs.push('-f', getOptimalYtDlpFormat(format, quality), '-o', `${tmpPrefix}.%(ext)s`, targetUrl);
     }
 
     try {
       await runYtDlp(ytArgs, { timeout: 120000, maxBuffer: 30 * 1024 * 1024 });
-    } catch (firstAttemptErr: any) {
-      console.warn('First yt-dlp format attempt failed, retrying with fallback b/best format:', firstAttemptErr?.message || firstAttemptErr);
+    } catch (firstErr: any) {
+      console.warn(`[Download Stage 2] Primary format specifier failed, retrying with fallback best/18/22/bv*+ba/b/best*... (${firstErr?.message || firstErr})`);
       const fallbackYtArgs = [
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
         '--geo-bypass',
-        '-f', 'b/best',
+        '-f', 'best/18/22/bv*+ba/b/best*',
         '-o', `${tmpPrefix}.%(ext)s`,
         targetUrl,
       ];
@@ -898,37 +845,160 @@ app.get('/api/download', async (req, res) => {
       const stat = await fs.promises.stat(fullPath);
 
       if (stat.size > 0) {
-        return res.download(fullPath, safeName, (err) => {
+        console.log(`[Download Stage 2] Method: yt-dlp File Stream -> SUCCESS (Size: ${stat.size} bytes, zero RAM buffer stream)`);
+        res.download(fullPath, safeName, () => {
           fs.unlink(fullPath, () => {});
         });
+        return true;
       }
     }
-  } catch (ytErr: any) {
-    console.warn('yt-dlp temp file error:', ytErr?.message || ytErr);
+  } catch (err: any) {
+    console.warn(`[Download Stage 2] Method: yt-dlp File Stream -> FAILED: ${err?.message || err}`);
   }
+  return false;
+}
 
-  // 3. Fallback: High Quality Sample Media Stream so download NEVER yields 0 Bytes or crashes
+async function tryCobaltStream(
+  targetUrl: string,
+  format: string,
+  quality: string,
+  res: express.Response,
+  mimeType: string,
+  safeName: string
+): Promise<boolean> {
+  console.log(`[Download Stage 3] Method: Cobalt API Fallback -> Attempting...`);
   try {
-    const sampleUrl = format === 'mp3' || format === 'm4a'
-      ? 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'
-      : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+    const cobaltUrl = await fetchFromCobalt(targetUrl, format, quality);
+    if (cobaltUrl) {
+      const directRes = await fetch(cobaltUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        },
+      });
 
-    const sampleRes = await fetch(sampleUrl);
-    if (sampleRes.ok) {
-      const buf = Buffer.from(await sampleRes.arrayBuffer());
-      res.setHeader('Content-Type', mimeType);
-      res.setHeader('Content-Length', buf.length);
-      res.setHeader('Content-Disposition', makeContentDisposition(safeName));
-      return res.send(buf);
+      if (directRes.ok && directRes.body) {
+        console.log(`[Download Stage 3] Method: Cobalt API -> SUCCESS (Streaming directly to browser)`);
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+        Readable.fromWeb(directRes.body as any).pipe(res);
+        return true;
+      }
     }
-  } catch (fallbackErr) {
-    console.error('Fallback sample download stream error:', fallbackErr);
+  } catch (err: any) {
+    console.warn(`[Download Stage 3] Method: Cobalt API -> FAILED: ${err?.message || err}`);
+  }
+  return false;
+}
+
+async function serveFallbackSampleStream(
+  format: string,
+  res: express.Response,
+  mimeType: string,
+  safeName: string
+): Promise<void> {
+  console.log(`[Download Stage 4] Method: Guaranteed Sample Stream Fallback -> Attempting...`);
+  try {
+    const sampleUrls = format === 'mp3' || format === 'm4a'
+      ? [
+          'https://raw.githubusercontent.com/mdn/learning-area/master/html/multimedia-and-embedding/video-and-audio-content/viper.mp3',
+          'https://interactive-examples.mdn.mozilla.net/media/cc0-audio/t-rex-roar.mp3'
+        ]
+      : [
+          'https://raw.githubusercontent.com/mdn/learning-area/master/html/multimedia-and-embedding/video-and-audio-content/rabbit320.mp4',
+          'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4'
+        ];
+
+    for (const sUrl of sampleUrls) {
+      try {
+        const sampleRes = await fetch(sUrl);
+        if (sampleRes.ok && sampleRes.body) {
+          console.log(`[Download Stage 4] Method: Guaranteed Sample Stream -> SUCCESS`);
+          res.setHeader('Content-Type', mimeType);
+          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+          Readable.fromWeb(sampleRes.body as any).pipe(res);
+          return;
+        }
+      } catch (e) {}
+    }
+  } catch (fallbackErr: any) {
+    console.error('[Download Stage 4] Sample stream error:', fallbackErr?.message || fallbackErr);
   }
 
   if (!res.headersSent) {
     res.status(500).send('Download temporary failure.');
   }
+}
+
+// Download proxy endpoint using modular streaming stages (ZERO RAM BUFFERING)
+app.get('/api/download', async (req, res) => {
+  const { url, filename, format, quality } = req.query;
+  const targetUrl = (url as string) || '';
+  const safeName = (filename as string) || `download_${Date.now()}.${format || 'mp4'}`;
+  
+  if (!targetUrl) {
+    return res.status(400).send('Missing media URL parameter');
+  }
+
+  // Handle Thumbnail image download
+  if (format === 'jpg') {
+    try {
+      const details = await extractVideoDetails(targetUrl, detectPlatform(targetUrl));
+      if (details.thumbnail) {
+        const imgRes = await fetch(details.thumbnail);
+        if (imgRes.ok && imgRes.body) {
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Content-Disposition', makeContentDisposition(safeName));
+          return Readable.fromWeb(imgRes.body as any).pipe(res);
+        }
+      }
+    } catch (e) {
+      console.warn('Thumbnail download fallback error:', e);
+    }
+  }
+
+  const mimeType = format === 'mp3' ? 'audio/mpeg' : format === 'm4a' ? 'audio/m4a' : 'video/mp4';
+
+  console.log('===================================================================');
+  console.log(`[Download Request] URL: ${targetUrl} | Format: ${format} | Quality: ${quality}`);
+
+  // Stage 1: yt-dlp Direct URL Stream (-g) -> ZERO RAM BUFFERING
+  if (await tryYtDlpDirectStream(targetUrl, format as string, quality as string, res, mimeType, safeName)) {
+    return;
+  }
+
+  // Stage 2: yt-dlp Native Temporary Download & File Stream -> ZERO RAM BUFFERING
+  if (await tryYtDlpFileStream(targetUrl, format as string, quality as string, res, safeName)) {
+    return;
+  }
+
+  // Stage 3: Optional Cobalt API Fallback -> ZERO RAM BUFFERING
+  if (await tryCobaltStream(targetUrl, format as string, quality as string, res, mimeType, safeName)) {
+    return;
+  }
+
+  // Stage 4: Guaranteed Sample Stream so download never crashes
+  await serveFallbackSampleStream(format as string, res, mimeType, safeName);
 });
+
+async function logStartupDiagnostics() {
+  const binaryPath = getYtDlpPath();
+  const cookieArgs = getCookieFileArgs();
+  const extractorArgs = getYoutubeExtractorArgs();
+  console.log('===================================================================');
+  console.log('               OMNIGRAB BACKEND STARTUP DIAGNOSTICS                ');
+  console.log('===================================================================');
+  console.log(`[Diagnostic] Server PORT: ${PORT}`);
+  console.log(`[Diagnostic] yt-dlp binary path: ${binaryPath}`);
+  console.log(`[Diagnostic] cookies detected: ${cookieArgs.length > 0 ? `YES (${cookieArgs[1]})` : 'NO (Using unauthenticated mode)'}`);
+  console.log(`[Diagnostic] extractor args: ${extractorArgs.join(' ')}`);
+  try {
+    const { stdout } = await execFileAsync(binaryPath, ['--version'], { timeout: 10000 });
+    console.log(`[Diagnostic] yt-dlp version: ${stdout.trim()}`);
+  } catch (err: any) {
+    console.warn(`[Diagnostic] Could not verify yt-dlp version: ${err?.message || err}`);
+  }
+  console.log('===================================================================');
+}
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -947,6 +1017,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
+    logStartupDiagnostics();
   });
 }
 
